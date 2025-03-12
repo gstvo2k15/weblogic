@@ -1,0 +1,64 @@
+FROM oracle/jdk:8
+
+# Copy WebLogic installer
+COPY fmw_12.2.1.4.0_wls_quick_Disk1_1of1.zip /u01/
+COPY install.file oraInst.loc /u01/
+COPY container-scripts/createAndStartEmptyDomain.sh /u01/oracle/
+COPY container-scripts/create-wls-domain.py /u01/oracle/
+COPY container-scripts/get_healthcheck_url.sh /u01/oracle/
+
+# Ensure installation directory exists
+RUN mkdir -p /u01 && chmod 775 /u01 && \
+    useradd -m -d /u01/oracle -s /bin/bash oracle && \
+    chown -R oracle:root /u01
+
+# Extract and Install WebLogic
+USER oracle
+RUN cd /u01 && \
+    ${JAVA_HOME}/bin/jar xf /u01/fmw_12.2.1.4.0_wls_quick_Disk1_1of1.zip && \
+    ls -l /u01 && \
+    test -f /u01/fmw_12.2.1.4.0_wls_quick.jar && \
+    echo "WebLogic JAR found, proceeding with installation..." && \
+    ${JAVA_HOME}/bin/java -jar /u01/fmw_12.2.1.4.0_wls_quick.jar -silent \
+    -responseFile /u01/install.file -invPtrLoc /u01/oraInst.loc \
+    -ignoreSysPrereqs -force -novalidation ORACLE_HOME=/u01/oracle && \
+    echo "WebLogic installed successfully." && \
+    rm /u01/fmw_12.2.1.4.0_wls_quick_Disk1_1of1.zip /u01/install.file
+
+# Final image stage
+FROM oracle/jdk:8
+
+ENV ORACLE_HOME=/u01/oracle \
+    USER_MEM_ARGS="-Djava.security.egd=file:/dev/./urandom" \
+    SCRIPT_FILE=/u01/oracle/createAndStartEmptyDomain.sh \
+    HEALTH_SCRIPT_FILE=/u01/oracle/get_healthcheck_url.sh \
+    PATH=$PATH:${JAVA_HOME}/bin:/u01/oracle/oracle_common/common/bin:/u01/oracle/wlserver/common/bin
+
+# Domain and Server environment variables
+ENV DOMAIN_NAME="${DOMAIN_NAME:-base_domain}" \
+    ADMIN_LISTEN_PORT="${ADMIN_LISTEN_PORT:-7001}"  \
+    ADMIN_NAME="${ADMIN_NAME:-AdminServer}" \
+    DEBUG_FLAG=true \
+    PRODUCTION_MODE=dev \
+    ADMINISTRATION_PORT_ENABLED="${ADMINISTRATION_PORT_ENABLED:-true}" \
+    ADMINISTRATION_PORT="${ADMINISTRATION_PORT:-9002}" 
+
+# Setup filesystem and oracle user
+RUN mkdir -p /u01 && \
+    chmod 775 /u01 && \
+    useradd -b /u01 -d /u01/oracle -m -s /bin/bash oracle && \
+    chown oracle:root /u01
+
+# Copy scripts
+COPY container-scripts/createAndStartEmptyDomain.sh container-scripts/create-wls-domain.py container-scripts/get_healthcheck_url.sh /u01/oracle/
+
+RUN chmod +xr $SCRIPT_FILE $HEALTH_SCRIPT_FILE && \
+    chown oracle:root $SCRIPT_FILE /u01/oracle/create-wls-domain.py $HEALTH_SCRIPT_FILE
+
+USER oracle
+
+HEALTHCHECK --start-period=10s --timeout=30s --retries=3 CMD curl -k -s --fail `$HEALTH_SCRIPT_FILE` || exit 1
+WORKDIR ${ORACLE_HOME}
+
+# Define default command to start script.
+CMD ["/u01/oracle/createAndStartEmptyDomain.sh"]
